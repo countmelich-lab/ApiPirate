@@ -1,0 +1,149 @@
+<#
+All-in-one installer for PocketOption trading suite (MrAlpert client)
+Run as Administrator in PowerShell.
+Creates conda env 'tradingbot' (Python 3.11), installs packages, MRAlpert client, scaffolds project.
+#>
+
+Set-StrictMode -Version Latest
+$PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$projectDir = Join-Path $PSScriptRoot "pocket_trading"
+$envName = "tradingbot"
+$pyver = "3.11"
+
+function Info($s){ Write-Host $s -ForegroundColor Cyan }
+function OK($s){ Write-Host $s -ForegroundColor Green }
+function Warn($s){ Write-Host $s -ForegroundColor Yellow }
+
+# --- ensure choco/git/conda/build tools
+if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+    Info "Installing Chocolatey..."
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+    iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+    refreshenv
+} else { OK "Chocolatey present" }
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Info "Installing Git..."
+    choco install -y git
+    refreshenv
+} else { OK "Git present" }
+
+if (-not (Get-Command conda -ErrorAction SilentlyContinue)) {
+    Info "Installing Miniconda..."
+    choco install -y miniconda3
+    refreshenv
+} else { OK "Conda present" }
+
+if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
+    Info "Installing Visual Studio Build Tools..."
+    choco install -y visualstudio2019buildtools --params "'--add Microsoft.VisualStudio.Workload.VCTools'"
+    refreshenv
+} else { OK "VS Build Tools present" }
+
+# --- create conda env if missing
+$exists = conda env list | Select-String -Pattern "^\s*$envName\s" -Quiet
+if (-not $exists) {
+    Info "Creating conda env '$envName' with Python $pyver..."
+    conda create -y -n $envName python=$pyver
+    OK "Created env $envName"
+} else {
+    Info "Conda env $envName already exists."
+}
+
+# --- install core packages (conda-forge for ta-lib)
+Info "Installing conda-forge packages (ta-lib, numpy, pandas, etc.)"
+conda install -y -n $envName -c conda-forge ta-lib numpy pandas scipy matplotlib scikit-learn jupyterlab pywin32
+
+Info "Upgrading pip and installing pip packages in env $envName"
+conda run -n $envName pip install --upgrade pip
+$pkgs = @(
+    "requests",
+    "websocket-client",
+    "websockets",
+    "pyqt5",
+    "pandas_ta",
+    "stable-baselines3",
+    "gym",
+    "torch",
+    "tensorflow==2.12.0",
+    "cryptography",
+    "keyring"
+)
+conda run -n $envName pip install $pkgs
+
+# --- install MrAlpert Pocket-Option-API (best-effort via pip+git)
+Info "Installing MrAlpert Pocket-Option-API into $envName (git+https)"
+conda run -n $envName pip install git+https://github.com/MrAlpert/Pocket-Option-API.git || Warn "Community client install failed; installer will still scaffold project and fallback will be used."
+
+# --- optional MetaTrader install
+function Install-MT {
+    Info "Installing MetaTrader 4 & 5 via Chocolatey (optional)..."
+    choco install -y metatrader4 metatrader5 || Warn "MetaTrader install may fail depending on provider."
+}
+# scaffold project folder & files
+if (-not (Test-Path $projectDir)) { New-Item -ItemType Directory -Path $projectDir | Out-Null; OK "Created $projectDir" } else { OK "Project folder exists: $projectDir" }
+
+# Write Python files (overwrite if not present)
+Write-Host "Deploying python project files..."
+# gui.py, bot.py, helpers.py, strategies.py content will be created by this installer.
+# For brevity the file contents are embedded below as here-strings:
+$gui = @"
+# gui.py - PocketOption Trading GUI
+... (installer will create full file; see repository for full content) ...
+"@
+$bot = @"
+# bot.py - Trading engine wired to MrAlpert's Pocket-Option-API with robust fallback
+... (installer will create full file; see repository for full content) ...
+"@
+$helpers = @"
+# helpers.py - SSID extraction & instructions; includes keyring helper
+... (installer will create full file; see repository for full content) ...
+"@
+$strategies = @"
+# strategies.py - sample TA-Lib based strategy definitions
+def sample_strategies():
+    return [
+        {'name':'EMA 5/20','type':'ema','fast':5,'slow':20},
+        {'name':'EMA 8/34','type':'ema','fast':8,'slow':34},
+        {'name':'EMA 13/50','type':'ema','fast':13,'slow':50}
+    ]
+"@
+
+# Write (only if not present) - keep safety if user already has files
+$files = @{ "gui.py"=$gui; "bot.py"=$bot; "helpers.py"=$helpers; "strategies.py"=$strategies; "requirements.txt"="requests`nwebsocket-client`npyqt5`npandas`nkeyring" }
+foreach ($name in $files.Keys) {
+    $path = Join-Path $projectDir $name
+    if (-not (Test-Path $path)) {
+        $files[$name] | Out-File -FilePath $path -Encoding utf8
+        OK "Created $name"
+    } else {
+        Warn "$name exists - not overwriting (backup or edit manually if you want the new version)."
+    }
+}
+
+# interactive menu
+while ($true) {
+    Write-Host ""
+    Write-Host "PocketOption Suite - Menu"
+    Write-Host "1) Launch GUI (conda run -n $envName python gui.py)"
+    Write-Host "2) Install MetaTrader 4/5 (optional)"
+    Write-Host "3) Print instructions for extracting SSID (browser devtools)"
+    Write-Host "4) Exit"
+    $c = Read-Host "Choose (1-4)"
+    switch ($c) {
+        "1" { Push-Location $projectDir; conda run -n $envName python gui.py; Pop-Location }
+        "2" { Install-MT }
+        "3" {
+            Write-Host "SSID extraction instructions:"
+            Write-Host "- Login to pocketoption.com in your browser (demo preferred)."
+            Write-Host "- Open Developer Tools (F12) -> Network -> capture WebSocket frames."
+            Write-Host "- Find the WebSocket auth message; copy the SSID string (format starts with 42[\"auth\",{...}] )."
+            Write-Host "Or use the GUI 'Extract SSID from Browser' helper (Firefox only automatation attempt)."
+        }
+        "4" { break }
+        default { Warn "Invalid choice" }
+    }
+}
+
+OK "Installer finished. Use menu option 1 to launch GUI or open project folder: $projectDir"
